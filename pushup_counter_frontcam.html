@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>푸쉬업 카운터 (전면카메라, 3회 보정)</title>
+  <style>
+    :root { --fg:#0b1320; --muted:#667085; --accent:#2563eb; --bg:#f8fafc; --card:#ffffff; }
+    html,body{height:100%}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Apple SD Gothic Neo,Pretendard,sans-serif;background:var(--bg);color:var(--fg)}
+    .wrap{max-width:720px;margin:0 auto;padding:20px}
+    .card{background:var(--card);border-radius:16px;box-shadow:0 8px 30px rgba(10, 20, 40, .08);padding:20px}
+    h1{margin:0 0 8px 0;font-size:1.4rem}
+    p{margin:6px 0;color:var(--muted)}
+    button{appearance:none;border:0;border-radius:12px;padding:12px 16px;font-weight:600;cursor:pointer}
+    .btn{background:var(--accent);color:#fff}
+    .btn:disabled{opacity:.6;cursor:not-allowed}
+    .btn2{background:#e2e8f0;color:#0b1320}
+    video{width:100%;max-height:45vh;border-radius:12px;background:#000}
+    .row{display:flex;gap:8px;flex-wrap:wrap}
+    .stat{display:flex;flex-direction:column;gap:4px;align-items:flex-start;background:#f1f5f9;border-radius:12px;padding:10px 12px;min-width:120px}
+    .stat b{font-size:1.6rem}
+    .meter{height:10px;background:#e2e8f0;border-radius:999px;overflow:hidden}
+    .meter > div{height:100%;width:0%}
+    .hint{font-size:.9rem;color:var(--muted)}
+    .ok{color:#059669}
+    .warn{color:#b45309}
+    .center{display:flex;gap:8px;align-items:center}
+    footer{margin-top:16px;font-size:12px;color:#94a3b8}
+    .toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#111827;color:#fff;padding:10px 14px;border-radius:10px;opacity:0;transition:opacity .2s}
+    .toast.show{opacity:1}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>푸쉬업 카운터 (전면카메라)</h1>
+      <p>설치 없이 브라우저에서 동작합니다. GitHub Pages(HTTPS) 배포 권장.</p>
+
+      <div id="step-intro">
+        <p>① <b>확인</b>을 눌러 전면카메라를 켭니다.<br>② 카메라를 <b>가슴 수직 아래 바닥</b>에 두세요.<br>③ <b>보정 시작</b>을 누르고 <b>3회 푸쉬업</b>으로 상·하 상태를 학습시킵니다.</p>
+        <div class="row">
+          <button id="btnStart" class="btn">확인(카메라 켜기)</button>
+          <button id="btnCalib" class="btn2" disabled>보정 시작</button>
+        </div>
+      </div>
+
+      <div id="step-calib" style="display:none">
+        <p><b>보정 중…</b> 천천히 3회 푸쉬업을 해주세요. 상·하 상태(밝기) 범위를 자동으로 학습합니다.</p>
+        <div class="row">
+          <div class="stat"><span>현재 밝기</span><b id="lblNow">-</b><div class="meter"><div id="barNow"></div></div></div>
+          <div class="stat"><span>관측 범위</span>
+            <div class="center"><span>min:</span><b id="lblMin">-</b></div>
+            <div class="center"><span>max:</span><b id="lblMax">-</b></div>
+          </div>
+          <div class="stat"><span>보정 진행</span><b id="lblCycles">0/3</b></div>
+        </div>
+        <div class="hint">※ 화면 밝기 자동조절(노출)이 심하면 조명/거리/각도를 조정해 주세요.</div>
+      </div>
+
+      <div id="step-ready" style="display:none">
+        <p class="ok">보정이 완료되었습니다. <b>시작</b>을 누르면 카운트합니다.</p>
+        <div class="row">
+          <div class="stat"><span>하 임계값</span><b id="lblLowTh">-</b></div>
+          <div class="stat"><span>상 임계값</span><b id="lblHighTh">-</b></div>
+        </div>
+        <button id="btnGo" class="btn">시작</button>
+      </div>
+
+      <div id="step-count" style="display:none">
+        <div class="row">
+          <div class="stat"><span>개수</span><b id="lblCount">0</b></div>
+          <div class="stat"><span>상태</span><b id="lblPose">-</b></div>
+        </div>
+        <p class="hint">완전하게 내려갔다가(Down) 다시 완전히 올라오면(Up) 1회로 계산합니다.</p>
+        <div class="row">
+          <button id="btnPause" class="btn2">일시정지</button>
+          <button id="btnReset" class="btn2">재보정</button>
+        </div>
+      </div>
+
+      <video id="video" playsinline autoplay muted></video>
+      <canvas id="canvas" width="160" height="120" hidden></canvas>
+      <footer>프라이버시: 영상은 기기에만 처리되며 서버로 전송되지 않습니다.</footer>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+  const btnStart = document.getElementById('btnStart');
+  const btnCalib = document.getElementById('btnCalib');
+  const btnGo = document.getElementById('btnGo');
+  const btnPause = document.getElementById('btnPause');
+  const btnReset = document.getElementById('btnReset');
+
+  const stepIntro = document.getElementById('step-intro');
+  const stepCalib = document.getElementById('step-calib');
+  const stepReady = document.getElementById('step-ready');
+  const stepCount = document.getElementById('step-count');
+
+  const lblNow = document.getElementById('lblNow');
+  const barNow = document.getElementById('barNow');
+  const lblMin = document.getElementById('lblMin');
+  const lblMax = document.getElementById('lblMax');
+  const lblCycles = document.getElementById('lblCycles');
+  const lblLowTh = document.getElementById('lblLowTh');
+  const lblHighTh = document.getElementById('lblHighTh');
+  const lblCount = document.getElementById('lblCount');
+  const lblPose = document.getElementById('lblPose');
+  const toast = document.getElementById('toast');
+
+  let stream = null;
+  let raf = null;
+  let wakeLock = null;
+
+  // smoothing
+  let ema = null;
+  const alpha = 0.12; // EMA 계수
+
+  // calibration state
+  let minSeen = 255, maxSeen = 0;
+  let lowThresh = 0, highThresh = 0;
+  let cycles = 0;
+  let phase = 'intro'; // intro|calib|ready|count|pause
+
+  // pose detection
+  const HYST = 0.12; // 임계 히스테리시스(범위의 12%)
+  let pose = 'unknown'; // 'down'|'up'|'unknown'
+  let prevPose = 'unknown';
+  let countedFromDown = false;
+  let count = 0;
+
+  function showToast(msg) {
+    toast.textContent = msg;
+    toast.classList.add('show');
+    setTimeout(()=> toast.classList.remove('show'), 1300);
+  }
+
+  function updateUI() {
+    lblCount.textContent = String(count);
+    lblPose.textContent = pose;
+    lblLowTh.textContent = lowThresh.toFixed(1);
+    lblHighTh.textContent = highThresh.toFixed(1);
+    lblMin.textContent = minSeen.toFixed(1);
+    lblMax.textContent = maxSeen.toFixed(1);
+    lblCycles.textContent = cycles + '/3';
+  }
+
+  function avgLuma() {
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    let sum = 0;
+    for (let i=0;i<data.length;i+=4){
+      sum += 0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2];
+    }
+    const y = sum / (canvas.width*canvas.height);
+    ema = (ema==null) ? y : (alpha*y + (1-alpha)*ema);
+    return ema;
+  }
+
+  function requestWakeLock() {
+    if ('wakeLock' in navigator && navigator.wakeLock.request) {
+      navigator.wakeLock.request('screen').then(lock => {
+        wakeLock = lock;
+        lock.addEventListener('release', () => { wakeLock = null; });
+      }).catch(()=>{});
+    }
+  }
+
+  async function startCamera() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+      btnCalib.disabled = false;
+      showToast('카메라 시작됨 (전면)');
+      requestWakeLock();
+    } catch (e) {
+      alert('카메라 권한이 필요합니다. 오류: ' + e.message);
+      console.error(e);
+    }
+  }
+
+  function loop() {
+    const y = avgLuma(); // 0~255
+    lblNow.textContent = y.toFixed(1);
+    barNow.style.width = Math.min(100, Math.max(0, (y/255)*100)) + '%';
+
+    if (phase === 'calib') {
+      // 상하 상태가 번갈아 나오도록 히스테리시스 없는 양끝 갱신
+      if (y < minSeen) minSeen = y;
+      if (y > maxSeen) maxSeen = y;
+
+      // 임시 임계 추정
+      const range = Math.max(8, maxSeen - minSeen);
+      const mid = minSeen + range/2;
+      // 상태 결정 (보정 동안엔 느슨하게)
+      const lowBand = mid - range*(0.25);
+      const highBand = mid + range*(0.25);
+      let calibPose = pose;
+      if (y <= lowBand) calibPose = 'down';
+      else if (y >= highBand) calibPose = 'up';
+
+      // 사이클 카운트: down -> up 전환을 1회로 간주
+      if (pose !== calibPose && (calibPose === 'down' || calibPose === 'up')) {
+        if (pose === 'down' && calibPose === 'up') {
+          cycles++;
+          showToast('보정 샘플: ' + cycles + ' / 3');
+          if (cycles >= 3) {
+            // 최종 임계 계산
+            const margin = Math.max(6, range * HYST);
+            lowThresh = minSeen + margin;
+            highThresh = maxSeen - margin;
+            phase = 'ready';
+            stepCalib.style.display = 'none';
+            stepReady.style.display = 'block';
+            showToast('보정 완료');
+          }
+        }
+        pose = calibPose;
+      }
+      updateUI();
+    }
+    else if (phase === 'count') {
+      // 보정 결과 기반으로 히스테리시스 임계 사용
+      const lowBand = lowThresh;
+      const highBand = highThresh;
+
+      // 현재 포즈
+      if (y <= lowBand) pose = 'down';
+      else if (y >= highBand) pose = 'up';
+
+      // 카운팅 규칙: 'down'을 찍은 다음 'up'을 통과하면 1회
+      if (prevPose !== pose) {
+        if (pose === 'down') {
+          countedFromDown = true;
+        } else if (pose === 'up' && countedFromDown) {
+          count++;
+          countedFromDown = false;
+          lblCount.textContent = String(count);
+          showToast(count + ' 회');
+        }
+      }
+      prevPose = pose;
+      updateUI();
+    }
+
+    raf = requestAnimationFrame(loop);
+  }
+
+  btnStart.addEventListener('click', async () => {
+    await startCamera();
+    stepIntro.style.display = 'block';
+    btnStart.disabled = true;
+  });
+
+  btnCalib.addEventListener('click', () => {
+    if (!stream) return;
+    // reset calib
+    ema = null;
+    minSeen = 255; maxSeen = 0; cycles = 0; pose = 'unknown'; prevPose='unknown';
+    stepIntro.style.display = 'none';
+    stepCalib.style.display = 'block';
+    phase = 'calib';
+    if (!raf) raf = requestAnimationFrame(loop);
+  });
+
+  btnGo.addEventListener('click', () => {
+    count = 0; countedFromDown = false; pose='unknown'; prevPose='unknown';
+    stepReady.style.display = 'none';
+    stepCount.style.display = 'block';
+    phase = 'count';
+  });
+
+  btnPause.addEventListener('click', () => {
+    if (phase === 'count') {
+      phase = 'pause';
+      btnPause.textContent = '계속';
+      showToast('일시정지');
+    } else if (phase === 'pause') {
+      phase = 'count';
+      btnPause.textContent = '일시정지';
+      showToast('계속');
+    }
+  });
+
+  btnReset.addEventListener('click', () => {
+    phase = 'intro';
+    stepCount.style.display = 'none';
+    stepReady.style.display = 'none';
+    stepCalib.style.display = 'none';
+    stepIntro.style.display = 'block';
+    btnStart.disabled = !!stream;
+    btnCalib.disabled = !stream;
+    count = 0; lblCount.textContent = '0';
+    showToast('재보정 준비');
+  });
+
+  // start render loop on visibility
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (raf) cancelAnimationFrame(raf), raf = null;
+      if (wakeLock) wakeLock.release().catch(()=>{});
+    } else {
+      if (!raf) raf = requestAnimationFrame(loop);
+      requestWakeLock();
+    }
+  });
+
+  window.addEventListener('beforeunload', () => {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+  });
+
+})();</script>
+</body>
+</html>
